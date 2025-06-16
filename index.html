@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Virtual Music Composer: Cello Symphony</title>
+    <style>
+        body {
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #ffe4e1;
+            font-family: Arial, sans-serif;
+        }
+        #composer-container {
+            margin: 20px;
+            border: 2px solid #c71585;
+            background-color: #fff;
+            box-shadow: 0 0 10px rgba(199, 21, 133, 0.3);
+            position: relative;
+        }
+        #controls {
+            margin-bottom: 10px;
+            display: flex;
+            gap: 10px;
+        }
+        button, select {
+            padding: 10px 20px;
+            margin: 5px;
+            background-color: #ff69b4;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        button:hover, select:hover {
+            background-color: #ff1493;
+        }
+        h1 {
+            color: #c71585;
+            text-shadow: 1px 1px 2px rgba(199, 21, 133, 0.1);
+        }
+        #playback-cursor {
+            position: absolute;
+            width: 2px;
+            height: 600px;
+            background-color: #ff4500;
+            opacity: 0.5;
+            display: none;
+        }
+        #bow-animation {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            width: 20px;
+            height: 20px;
+            background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23ff69b4"><path d="M12 2s-10 4-10 10 10 10 10 10 10-4 10-10S12 2 12 2z"/></svg>');
+            background-size: cover;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <h1>Virtual Music Composer: Cello Symphony</h1>
+    <div id="controls">
+        <button onclick="playComposition()">Play</button>
+        <button onclick="stopComposition()">Stop</button>
+        <button onclick="clearComposition()">Clear</button>
+        <button onclick="saveComposition()">Save</button>
+        <button onclick="loadComposition()">Load</button>
+        <button onclick="downloadComposition()">Download</button>
+        <select id="noteDuration" onchange="setNoteDuration(this.value)">
+            <option value="0.25">Quarter Note</option>
+            <option value="0.5">Half Note</option>
+            <option value="1">Whole Note</option>
+        </select>
+    </div>
+    <div id="composer-container">
+        <canvas id="composerCanvas" width="800" height="600"></canvas>
+        <div id="playback-cursor"></div>
+        <div id="bow-animation"></div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('composerCanvas');
+        const ctx = canvas.getContext('2d');
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const cursor = document.getElementById('playback-cursor');
+        const bow = document.getElementById('bow-animation');
+
+        // Grid settings
+        const gridWidth = 800;
+        const gridHeight = 600;
+        const numCols = 16; // Time steps
+        const numRows = 18; // Pitch range (C2 to A4)
+        const cellWidth = gridWidth / numCols;
+        const cellHeight = gridHeight / numRows;
+
+        // Note data
+        const notes = [
+            'C2', 'D2', 'E2', 'F2', 'G2', 'A2', 'B2',
+            'C3', 'D3', 'E3', 'F3', 'G3', 'A3', 'B3',
+            'C4', 'D4', 'E4', 'A4'
+        ].reverse(); // Lower pitches at bottom
+        let composition = []; // Array of {row, col, duration}
+        let currentDuration = 0.25; // Default: quarter note
+        let mediaRecorder;
+        let audioChunks = [];
+
+        // Draw grid
+        function drawGrid() {
+            ctx.clearRect(0, 0, gridWidth, gridHeight);
+            ctx.strokeStyle = '#c71585';
+            ctx.lineWidth = 1;
+
+            // Draw vertical lines
+            for (let i = 0; i <= numCols; i++) {
+                ctx.beginPath();
+                ctx.moveTo(i * cellWidth, 0);
+                ctx.lineTo(i * cellWidth, gridHeight);
+                ctx.stroke();
+            }
+
+            // Draw horizontal lines
+            for (let i = 0; i <= numRows; i++) {
+                ctx.beginPath();
+                ctx.moveTo(0, i * cellHeight);
+                ctx.lineTo(gridWidth, i * cellHeight);
+                ctx.stroke();
+            }
+
+            // Draw notes
+            ctx.fillStyle = '#ff69b4';
+            composition.forEach(note => {
+                const width = cellWidth * note.duration * 4; // Visual width based on duration
+                ctx.beginPath();
+                ctx.ellipse(
+                    note.col * cellWidth + cellWidth / 2,
+                    note.row * cellHeight + cellHeight / 2,
+                    width / 2,
+                    cellHeight / 3,
+                    0,
+                    0,
+                    2 * Math.PI
+                );
+                ctx.fill();
+            });
+
+            // Draw note labels
+            ctx.fillStyle = '#c71585';
+            ctx.font = '12px Arial';
+            notes.forEach((note, index) => {
+                ctx.fillText(note, 5, (index + 0.5) * cellHeight + 5);
+            });
+        }
+
+        // Handle canvas click
+        canvas.addEventListener('click', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            const col = Math.floor(x / cellWidth);
+            const row = Math.floor(y / cellHeight);
+
+            // Toggle note
+            const noteIndex = composition.findIndex(n => n.row === row && n.col === col);
+            if (noteIndex === -1) {
+                composition.push({ row, col, duration: currentDuration });
+            } else {
+                composition.splice(noteIndex, 1);
+            }
+            drawGrid();
+        });
+
+        // Set note duration
+        function setNoteDuration(value) {
+            currentDuration = parseFloat(value);
+        }
+
+        // Cello-like sound synthesis
+        function playNote(note, startTime, duration, stream = null) {
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            const filter = audioCtx.createBiquadFilter();
+            const vibrato = audioCtx.createOscillator();
+            const vibratoGain = audioCtx.createGain();
+
+            // Cello sound: sawtooth with vibrato and envelope
+            oscillator.type = 'sawtooth';
+            const freq = noteToFrequency(note);
+            oscillator.frequency.setValueAtTime(freq, startTime);
+
+            // Vibrato for cello expressiveness
+            vibrato.type = 'sine';
+            vibrato.frequency.setValueAtTime(5, startTime); // 5 Hz vibrato
+            vibratoGain.gain.setValueAtTime(freq * 0.05, startTime); // Vibrato depth
+            vibrato.connect(oscillator.frequency);
+            vibrato.start(startTime);
+            vibrato.stop(startTime + duration);
+
+            // Low-pass filter for warmth
+            filter.type = 'lowpass';
+            filter.frequency.setValueAtTime(800, startTime);
+            filter.Q.setValueAtTime(1, startTime);
+
+            // Envelope for bow-like attack and decay
+            gainNode.gain.setValueAtTime(0, startTime);
+            gainNode.gain.linearRampToValueAtTime(0.4, startTime + 0.05); // Quick attack
+            gainNode.gain.linearRampToValueAtTime(0.3, startTime + duration * 0.7); // Sustain
+            gainNode.gain.exponentialRampToValueAtTime(0.01, startTime + duration); // Decay
+
+            oscillator.connect(filter);
+            filter.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            if (stream) {
+                gainNode.connect(stream); // Connect to recording stream if provided
+            }
+
+            oscillator.start(startTime);
+            oscillator.stop(startTime + duration);
+        }
+
+        // Convert note to frequency
+        function noteToFrequency(note) {
+            const noteMap = {
+                'C2': 65.41, 'D2': 73.42, 'E2': 82.41, 'F2': 87.31, 'G2': 98.00, 'A2': 110.00, 'B2': 123.47,
+                'C3': 130.81, 'D3': 146.83, 'E3': 164.81, 'F3': 174.61, 'G3': 196.00, 'A3': 220.00, 'B3': 246.94,
+                'C4': 261.63, 'D4': 293.66, 'E4': 329.63, 'A4': 440.00
+            };
+            return noteMap[note];
+        }
+
+        // Setup audio recording
+        function setupRecorder() {
+            const stream = audioCtx.createMediaStreamDestination();
+            mediaRecorder = new MediaRecorder(stream.stream);
+            audioChunks = [];
+
+            mediaRecorder.ondataavailable = (e) => {
+                audioChunks.push(e.data);
+            };
+
+            mediaRecorder.onstop = () => {
+                const blob = new Blob(audioChunks, { type: 'audio/wav' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'cello_composition.wav';
+                a.click();
+                URL.revokeObjectURL(url);
+            };
+
+            return stream;
+        }
+
+        // Play composition
+        let isPlaying = false;
+        function playComposition(isDownload = false) {
+            if (isPlaying) return;
+            isPlaying = true;
+            const tempo = 120; // BPM
+            const beatDuration = 60 / tempo; // Seconds per beat
+            let currentTime = audioCtx.currentTime;
+
+            // Setup recording if downloading
+            let stream = null;
+            if (isDownload) {
+                stream = setupRecorder();
+                mediaRecorder.start();
+            }
+
+            // Show cursor and bow
+            cursor.style.display = 'block';
+            bow.style.display = 'block';
+
+            // Animate cursor
+            const maxCol = Math.max(...composition.map(n => n.col + n.duration * 4), 0);
+            cursor.style.transition = `left ${maxCol * beatDuration}s linear`;
+            cursor.style.left = '0px';
+            setTimeout(() => {
+                cursor.style.left = `${gridWidth}px`;
+            }, 0);
+
+            // Animate bow
+            let bowDirection = 1;
+            const bowMove = setInterval(() => {
+                const currentTop = parseFloat(bow.style.top) || 10;
+                bow.style.top = `${currentTop + bowDirection * 2}px`;
+                if (currentTop > 50 || currentTop < 10) bowDirection *= -1;
+            }, 100);
+
+            // Play notes
+            composition.forEach(note => {
+                const noteName = notes[note.row];
+                const startTime = currentTime + note.col * beatDuration;
+                const noteDuration = beatDuration * note.duration * 4;
+                playNote(noteName, startTime, noteDuration, stream);
+            });
+
+            // Stop after last note
+            setTimeout(() => {
+                isPlaying = false;
+                cursor.style.display = 'none';
+                bow.style.display = 'none';
+                clearInterval(bowMove);
+                if (isDownload && mediaRecorder && mediaRecorder.state === 'recording') {
+                    mediaRecorder.stop();
+                }
+            }, maxCol * beatDuration * 1000);
+        }
+
+        // Stop composition
+        function stopComposition() {
+            isPlaying = false;
+            cursor.style.display = 'none';
+            bow.style.display = 'none';
+            if (mediaRecorder && mediaRecorder.state === 'recording') {
+                mediaRecorder.stop();
+            }
+        }
+
+        // Clear composition
+        function clearComposition() {
+            composition = [];
+            drawGrid();
+        }
+
+        // Save composition
+        function saveComposition() {
+            const data = JSON.stringify(composition);
+            localStorage.setItem('celloComposition', data);
+            alert('Composition saved!');
+        }
+
+        // Load composition
+        function loadComposition() {
+            const data = localStorage.getItem('celloComposition');
+            if (data) {
+                composition = JSON.parse(data);
+                drawGrid();
+                alert('Composition loaded!');
+            } else {
+                alert('No saved composition found.');
+            }
+        }
+
+        // Download composition
+        function downloadComposition() {
+            if (composition.length === 0) {
+                alert('No composition to download!');
+                return;
+            }
+            playComposition(true); // Trigger playback with recording
+        }
+
+        // Initialize
+        drawGrid();
+    </script>
+</body>
+</html>
